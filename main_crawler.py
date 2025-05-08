@@ -84,60 +84,139 @@ class GuidanceCrawler:
         except Exception as e:
             print(f"Error processing page {self.current_page}: {e}")
 
-    def _process_link(self, url, title):
-        """Process a single link to a guidance page."""
-        original_window = self.driver.current_window_handle
+    def _process_link(self, url, title, max_retries=5, retry_delay=10):
+        """Process a single link to a guidance page with retry mechanism."""
+        retry_count = 0
+        while retry_count < max_retries:
+            original_window = self.driver.current_window_handle
 
-        # Open the link in a new tab
-        self.driver.execute_script("window.open('');")
-        self.driver.switch_to.window(self.driver.window_handles[1])
-
-        try:
-            # Navigate to the URL
-            print(f"Accessing: {url}")
-            self.driver.get(url)
-            time.sleep(2)  # Wait for page to load
-
-            # Confirm we've reached the guidance page
             try:
-                # Look for typical elements on guidance pages
-                # You may need to adjust the class name based on actual pages
-                content_element = self.driver.find_element(By.CLASS_NAME, "content")
-                print(f"✓ Successfully accessed guidance page: {title}")
+                # Open the link in a new tab
+                self.driver.execute_script("window.open('');")
+                self.driver.switch_to.window(self.driver.window_handles[1])
 
-                # Look for PDF download buttons and download the PDF
-                pdf_downloader = PDFDownloader(self.driver)
-                pdf_downloader.find_and_download_pdf(title)
+                # Navigate to the URL
+                print(f"Accessing: {url} (Attempt {retry_count + 1}/{max_retries})")
+                self.driver.get(url)
+                time.sleep(2)  # Wait for page to load
+
+                # Confirm we've reached the guidance page
+                try:
+                    # Look for typical elements on guidance pages
+                    content_element = self.driver.find_element(By.CLASS_NAME, "content")
+                    print(f"✓ Successfully accessed guidance page: {title}")
+
+                    # Look for PDF download buttons and download the PDF
+                    pdf_downloader = PDFDownloader(self.driver)
+                    pdf_downloader.find_and_download_pdf(title)
+                    break  # Success, exit the retry loop
+
+                except NoSuchElementException:
+                    print(f"× This doesn't appear to be a guidance page: {title}")
+                    break  # Not a guidance page, no need to retry
+
+            except TimeoutException:
+                print(f"Timeout accessing page")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    retry_count += 1
+                    # Close the tab if it was opened before the timeout
+                    try:
+                        self.driver.close()
+                        self.driver.switch_to.window(original_window)
+                    except:
+                        pass
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print("Maximum retries reached. Timeout persists.")
+                    break
+
+            except Exception as e:
+                print(f"Error processing link: {e}")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    retry_count += 1
+                    # Close the tab if it was opened before the error
+                    try:
+                        self.driver.close()
+                        self.driver.switch_to.window(original_window)
+                    except:
+                        pass
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print("Maximum retries reached. Error persists.")
+                    break
+
+            finally:
+                # Make sure we close the tab and switch back to the main window
+                try:
+                    self.driver.close()
+                    self.driver.switch_to.window(original_window)
+                except Exception as e:
+                    print(f"Error while closing tab: {e}")
+                    # If we can't close the tab, try to at least get back to the original window
+                    try:
+                        if len(self.driver.window_handles) > 0:
+                            self.driver.switch_to.window(self.driver.window_handles[0])
+                    except:
+                        pass
+
+    def _goto_next_page(self, max_retries=3, retry_delay=5):
+        """Navigate to the next page with retry mechanism."""
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # Find and click the "Next Page" button
+                next_button = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.CLASS_NAME, "clickpage.next"))
+                )
+                next_button.click()
+
+                # Wait for the page to refresh
+                WebDriverWait(self.driver, 10).until(
+                    EC.staleness_of(next_button)
+                )
+
+                # Wait for new content to load
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "topdownlist"))
+                )
+
+                # Update current page counter
+                self.current_page += 1
+                print(f"Navigated to page {self.current_page}")
+                return True
+
+            except TimeoutException:
+                print(f"Timeout navigating to next page")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print("Maximum retries reached. Could not navigate to next page.")
+                    return False
 
             except NoSuchElementException:
-                print(f"× This doesn't appear to be a guidance page: {title}")
+                print("Next page button not found")
+                return False
 
-        except Exception as e:
-            print(f"Error processing link: {e}")
+            except Exception as e:
+                print(f"Error navigating to next page: {e}")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print("Maximum retries reached. Error persists.")
+                    return False
 
-        finally:
-            # Close the tab and switch back to main window
-            self.driver.close()
-            self.driver.switch_to.window(original_window)
-
-    def _goto_next_page(self):
-        """Navigate to the next page."""
-        try:
-            # Find and click the "Next Page" button
-            next_button = self.driver.find_element(By.CLASS_NAME, "clickpage.next")
-            next_button.click()
-
-            # Wait for the page to refresh
-            time.sleep(2)
-
-            # Update current page counter
-            self.current_page += 1
-            print(f"Navigated to page {self.current_page}")
-            return True
-
-        except NoSuchElementException:
-            print("Next page button not found")
-            return False
-        except Exception as e:
-            print(f"Error navigating to next page: {e}")
-            return False
+        return False  # Should not reach here, but just in case

@@ -89,45 +89,107 @@ class PDFDownloader:
         # Replace invalid filename characters with underscores
         return re.sub(r'[\\/*?:"<>|]', "_", filename)
 
-    def _download_pdf_from_url(self, url, title):
-        """Download a PDF from a URL using requests."""
+    def _download_pdf_from_url(self, url, title, max_retries=3, retry_delay=5):
+        """Download a PDF from a URL using requests with retry mechanism."""
         import requests
         from urllib.parse import urlparse
+        import time
+        import os
 
-        try:
-            print(f"Attempting to download PDF from: {url}")
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                print(f"Attempting to download PDF from: {url} (Attempt {retry_count + 1}/{max_retries})")
 
-            # Make the GET request
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            }
-            response = requests.get(url, headers=headers, stream=True)
+                # Make the GET request with timeout
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                }
+                response = requests.get(url, headers=headers, stream=True, timeout=30)
 
-            # Check if the response is valid
-            if response.status_code == 200:
-                # If the URL doesn't end with .pdf, get filename from parsed URL
-                if not url.lower().endswith('.pdf'):
-                    parsed_url = urlparse(url)
-                    path_parts = parsed_url.path.split('/')
-                    filename = next((part for part in reversed(path_parts) if part.lower().endswith('.pdf')), None)
-                    if not filename:
-                        filename = f"{title}.pdf"
+                # Check if the response is valid
+                if response.status_code == 200:
+                    # Check if content is actually a PDF (by checking Content-Type or first few bytes)
+                    content_type = response.headers.get('Content-Type', '').lower()
+
+                    if 'application/pdf' in content_type or response.content[:4] == b'%PDF':
+                        # If the URL doesn't end with .pdf, get filename from parsed URL
+                        if not url.lower().endswith('.pdf'):
+                            parsed_url = urlparse(url)
+                            path_parts = parsed_url.path.split('/')
+                            filename = next((part for part in reversed(path_parts) if part.lower().endswith('.pdf')),
+                                            None)
+                            if not filename:
+                                filename = f"{title}.pdf"
+                        else:
+                            filename = f"{title}.pdf"
+
+                        # Save the file
+                        filepath = os.path.join(self.download_dir, filename)
+                        with open(filepath, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+
+                        print(f"Successfully downloaded PDF to: {filepath}")
+                        return True
+                    else:
+                        print(f"Response doesn't appear to be a PDF. Content-Type: {content_type}")
+                        if retry_count < max_retries - 1:
+                            print(f"Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_count += 1
+                            continue
+                        else:
+                            print("Maximum retries reached. Could not download PDF.")
+                            return False
                 else:
-                    filename = f"{title}.pdf"
+                    print(f"Failed to download PDF. Status code: {response.status_code}")
+                    if response.status_code in [429, 500, 502, 503, 504]:  # Retry on server errors or rate limiting
+                        if retry_count < max_retries - 1:
+                            wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                            print(f"Retrying in {wait_time} seconds...")
+                            time.sleep(wait_time)
+                            retry_count += 1
+                            continue
+                        else:
+                            print("Maximum retries reached. Could not download PDF.")
+                    return False
 
-                # Save the file
-                filepath = os.path.join(self.download_dir, filename)
-                with open(filepath, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+            except requests.exceptions.Timeout:
+                print("Request timed out")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print("Maximum retries reached. Request timed out repeatedly.")
+                    return False
 
-                print(f"Successfully downloaded PDF to: {filepath}")
-                return True
-            else:
-                print(f"Failed to download PDF. Status code: {response.status_code}")
-                return False
+            except requests.exceptions.ConnectionError as e:
+                print(f"Connection error: {e}")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print("Maximum retries reached. Connection error persists.")
+                    return False
 
-        except Exception as e:
-            print(f"Error downloading PDF: {e}")
-            return False
+            except Exception as e:
+                print(f"Error downloading PDF: {e}")
+                if retry_count < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry_count)  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print("Maximum retries reached. Unexpected error persists.")
+                    return False
+
+        return False  # Should not reach here, but just in case
